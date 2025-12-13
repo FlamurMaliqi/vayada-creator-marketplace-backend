@@ -156,7 +156,7 @@ async def get_creator_profile_status(user_id: str = Depends(get_current_user_id)
                 detail="Creator profile not found"
             )
         
-        # Check for platforms
+        # Check for platforms with all required fields
         platforms = await Database.fetch(
             """
             SELECT id, name, handle, followers, engagement_rate
@@ -170,34 +170,56 @@ async def get_creator_profile_status(user_id: str = Depends(get_current_user_id)
         missing_fields = []
         completion_steps = []
         
-        # Check name (from users table)
+        # Check name (from users table) - required, non-empty, not just whitespace
         if not user['name'] or not user['name'].strip():
             missing_fields.append("name")
             completion_steps.append("Add your name")
         
-        # Check location
+        # Check location - required, non-empty, not just whitespace
         if not creator['location'] or not creator['location'].strip():
             missing_fields.append("location")
             completion_steps.append("Set your location")
         
-        # Check short_description
-        if not creator['short_description'] or not creator['short_description'].strip():
-            missing_fields.append("short_description")
-            completion_steps.append("Add a short description about yourself")
+        # Check portfolioLink - required, valid URL format
+        if not creator['portfolio_link'] or not creator['portfolio_link'].strip():
+            missing_fields.append("portfolioLink")
+            completion_steps.append("Add your portfolio link")
+        else:
+            # Basic URL validation (should be a valid URL)
+            portfolio_link = creator['portfolio_link'].strip()
+            if not (portfolio_link.startswith('http://') or portfolio_link.startswith('https://')):
+                missing_fields.append("portfolioLink")
+                completion_steps.append("Add a valid portfolio link (must start with http:// or https://)")
         
-        # Check for platforms
-        # A platform is valid if it has a handle and followers > 0
-        valid_platforms = [
-            p for p in platforms
-            if p['handle'] and p['handle'].strip() and p['followers'] and p['followers'] > 0
-        ]
+        # Check phone - required, valid phone format
+        if not creator['phone'] or not creator['phone'].strip():
+            missing_fields.append("phone")
+            completion_steps.append("Add your phone number")
+        
+        # Check for platforms - at least one platform with all required fields
+        # Platform is valid if it has:
+        # - name: Required (e.g., "Instagram", "TikTok")
+        # - handle: Required, non-empty
+        # - followers: Required, number > 0
+        # - engagement_rate: Required, number between 0-100
+        valid_platforms = []
+        for p in platforms:
+            if (p['name'] and p['name'].strip() and
+                p['handle'] and p['handle'].strip() and
+                p['followers'] is not None and p['followers'] > 0 and
+                p['engagement_rate'] is not None and 0 <= float(p['engagement_rate']) <= 100):
+                valid_platforms.append(p)
         
         missing_platforms = len(valid_platforms) == 0
         
         if missing_platforms:
-            completion_steps.append("Add at least one social media platform")
+            completion_steps.append("Add at least one social media platform with name, handle, followers, and engagement rate")
         
         # Determine if profile is complete
+        # Profile is complete when:
+        # 1. All required fields are filled (name, location, portfolioLink, phone)
+        # 2. At least one social media platform exists with all required fields
+        # 3. No fields contain only whitespace or default/placeholder values
         profile_complete = (
             len(missing_fields) == 0 and
             not missing_platforms

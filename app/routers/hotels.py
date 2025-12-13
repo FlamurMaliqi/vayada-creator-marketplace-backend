@@ -15,6 +15,7 @@ router = APIRouter(prefix="/hotels", tags=["hotels"])
 class HotelProfileStatusHasDefaults(BaseModel):
     """Nested model for default value flags"""
     location: bool
+    # Note: category was removed from hotel_profiles in migration 007
 
 
 class HotelProfileStatusResponse(BaseModel):
@@ -75,28 +76,64 @@ async def get_hotel_profile_status(user_id: str = Depends(get_current_user_id)):
                 detail="Hotel profile not found"
             )
         
-        # Check for listings
-        listings = await Database.fetch(
+        # Check for listings with detailed validation (optimized query)
+        # Get all listings with their offerings and requirements in one query
+        listings_data = await Database.fetch(
             """
-            SELECT id FROM hotel_listings
-            WHERE hotel_profile_id = $1
+            SELECT 
+                l.id,
+                l.name,
+                l.location,
+                l.description,
+                l.accommodation_type,
+                COUNT(DISTINCT o.id) FILTER (WHERE o.id IS NOT NULL AND 
+                    array_length(o.availability_months, 1) > 0 AND 
+                    array_length(o.platforms, 1) > 0) as valid_offerings_count,
+                r.platforms as req_platforms,
+                r.target_countries as req_countries
+            FROM hotel_listings l
+            LEFT JOIN listing_collaboration_offerings o ON l.id = o.listing_id
+            LEFT JOIN listing_creator_requirements r ON l.id = r.listing_id
+            WHERE l.hotel_profile_id = $1
+            GROUP BY l.id, l.name, l.location, l.description, l.accommodation_type, r.platforms, r.target_countries
             """,
             hotel['id']
         )
         
-        missing_listings = len(listings) == 0
+        # Validate each listing to ensure it's complete
+        valid_listings = []
+        for listing in listings_data:
+            # Check listing has all required fields
+            if not (listing['name'] and listing['name'].strip() and
+                    listing['location'] and listing['location'].strip() and
+                    listing['description'] and listing['description'].strip() and
+                    listing['accommodation_type'] and listing['accommodation_type'].strip()):
+                continue
+            
+            # Check listing has at least one valid collaboration offering
+            if not listing['valid_offerings_count'] or listing['valid_offerings_count'] == 0:
+                continue
+            
+            # Check listing has creator requirements with at least one platform and one country
+            if (not listing['req_platforms'] or len(listing['req_platforms']) == 0 or
+                not listing['req_countries'] or len(listing['req_countries']) == 0):
+                continue
+            
+            valid_listings.append(listing)
+        
+        missing_listings = len(valid_listings) == 0
         
         # Determine missing fields and defaults
         missing_fields = []
         completion_steps = []
         has_default_location = False
         
-        # Check name
+        # Check name - required, non-empty, not just whitespace
         if not hotel['name'] or not hotel['name'].strip():
             missing_fields.append("name")
             completion_steps.append("Update your hotel name")
         
-        # Check location (required field, but check if it's the default)
+        # Check location - required, non-empty, NOT a default value
         if not hotel['location'] or not hotel['location'].strip():
             missing_fields.append("location")
             completion_steps.append("Set your location")
@@ -105,28 +142,41 @@ async def get_hotel_profile_status(user_id: str = Depends(get_current_user_id)):
             # Don't add to missing_fields - defaults are tracked separately
             completion_steps.append("Set a custom location (currently using default)")
         
-        # Email is always in users table, so no need to check it here
-        
-        # Check optional but recommended fields
+        # Check about - required, non-empty, minimum length (50 characters as per common practice)
         if not hotel['about'] or not hotel['about'].strip():
             missing_fields.append("about")
             completion_steps.append("Add a description about your hotel")
+        elif len(hotel['about'].strip()) < 50:
+            missing_fields.append("about")
+            completion_steps.append("Add a more detailed description about your hotel (minimum 50 characters)")
         
+        # Check website - required, valid URL format
         if not hotel['website'] or not hotel['website'].strip():
             missing_fields.append("website")
             completion_steps.append("Add your website URL")
+        else:
+            website = hotel['website'].strip()
+            if not (website.startswith('http://') or website.startswith('https://')):
+                missing_fields.append("website")
+                completion_steps.append("Add a valid website URL (must start with http:// or https://)")
         
         # Check for listings
         if missing_listings:
-            completion_steps.append("Add at least one property listing")
+            completion_steps.append("Add at least one property listing with all required fields (name, location, accommodation type, description, collaboration offerings, and creator requirements)")
         
         # Determine if profile is complete
         # Profile is complete when:
-        # - All required fields are filled (name, location)
-        # - Location is not using default value
-        # - Optional fields like about and website are present (based on business logic)
-        # - At least one listing exists
+        # 1. All required fields are filled (name, location, about, website)
+        # 2. Location is NOT a default/placeholder value
+        # 3. At least one listing exists with all required fields:
+        #    - Listing name, location, accommodation type, description
+        #    - At least one collaboration type selected
+        #    - At least one availability month selected
+        #    - At least one posting platform selected
+        #    - At least one "looking for" platform selected
+        #    - At least one target country selected
         # Note: Email is always in users table, so not checked here
+        # Note: Category was removed from hotel_profiles in migration 007
         profile_complete = (
             len(missing_fields) == 0 and
             not has_default_location and
